@@ -102,6 +102,25 @@ catch2-devel
 
 </details>
 
+
+details>
+<summary>pacman-based distros</summary>
+
+```
+base-devel cmake ninja cat sdl2-compat
+```
+If your CMake version is less than 3.31, you will also need
+```
+pkgconf
+```
+Additionally, if you want to build unit tests:
+```
+catch2
+```
+
+</details>
+
+
 ## Building the game
 
 ### Building from the command line
