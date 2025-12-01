@@ -262,6 +262,8 @@ target_sources(EndlessSkyLib PRIVATE
 	Sale.h
 	SavedGame.cpp
 	SavedGame.h
+	SaveGameManager.cpp
+	SaveGameManager.h
 	Screen.cpp
 	Screen.h
 	ScrollBar.cpp

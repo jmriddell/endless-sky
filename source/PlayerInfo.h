@@ -89,6 +89,7 @@ public:
 	void New(const StartConditions &start);
 	// Load an existing player.
 	void Load(const std::filesystem::path &path);
+	void Load(const DataNode &root);
 	// Load the most recently saved player. If no save could be loaded, returns false.
 	bool LoadRecent();
 	// Save this player (using the Identifier() as the file name).
@@ -383,7 +384,7 @@ private:
 	void StepMissions(UI *ui);
 	void Autosave() const;
 	void Save(const std::string &path) const;
-	void Save(DataWriter &out) const;
+	void Save(DataNode &root) const;
 
 	// Check for and apply any punitive actions from planetary security.
 	void Fine(UI *ui);
@@ -516,5 +517,5 @@ private:
 	// Basic information about the player's starting scenario.
 	CoreStartData startData;
 
-	DataWriter *transactionSnapshot = nullptr;
+	DataNode *transactionSnapshot = nullptr;
 };

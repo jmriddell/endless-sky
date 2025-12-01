@@ -38,7 +38,9 @@ this program. If not, see <https://www.gnu.org/licenses/>.
 #include "Preferences.h"
 #include "RaidFleet.h"
 #include "Random.h"
+#include "Random.h"
 #include "SavedGame.h"
+#include "SaveGameManager.h"
 #include "Ship.h"
 #include "ShipEvent.h"
 #include "StartConditions.h"
@@ -224,6 +226,20 @@ void PlayerInfo::New(const StartConditions &start)
 // Load player information from a saved game file.
 void PlayerInfo::Load(const filesystem::path &path)
 {
+	filePath = path.string();
+	// Strip anything after the "~" from snapshots, so that the file we save
+	// will be the auto-save, not the snapshot.
+	size_t pos = filePath.find('~');
+	size_t namePos = filePath.length() - Files::Name(filePath).length();
+	if(pos != string::npos && pos > namePos)
+		filePath = filePath.substr(0, pos) + ".txt";
+
+	SaveGameManager manager(path.string());
+	Load(manager.Load());
+}
+
+void PlayerInfo::Load(const DataNode &root)
+{
 	// Make sure any previously loaded data is cleared.
 	Clear();
 
@@ -234,14 +250,6 @@ void PlayerInfo::Load(const filesystem::path &path)
 	map<string, map<string, int>> missionCargoToDistribute;
 	map<string, map<string, int>> missionPassengersToDistribute;
 
-	filePath = path.string();
-	// Strip anything after the "~" from snapshots, so that the file we save
-	// will be the auto-save, not the snapshot.
-	size_t pos = filePath.find('~');
-	size_t namePos = filePath.length() - Files::Name(filePath).length();
-	if(pos != string::npos && pos > namePos)
-		filePath = filePath.substr(0, pos) + ".txt";
-
 	// The player may have bribed their current planet in the last session. Ensure
 	// we provide the same access to services in this session, too.
 	bool hasFullClearance = false;
@@ -249,8 +257,7 @@ void PlayerInfo::Load(const filesystem::path &path)
 	// Register derived conditions now, so old primary versions can load into them.
 	RegisterDerivedConditions();
 
-	DataFile file(path);
-	for(const DataNode &child : file)
+	for(const DataNode &child : root)
 	{
 		const string &key = child.Token(0);
 		bool hasValue = child.Size() >= 2;
@@ -505,10 +512,7 @@ void PlayerInfo::Load(const filesystem::path &path)
 // Load the most recently saved player (if any). Returns false when no save was loaded.
 bool PlayerInfo::LoadRecent()
 {
-	string recentPath = Files::Read(Files::Config() / "recent.txt");
-	// Trim trailing whitespace (including newlines) from the path.
-	while(!recentPath.empty() && recentPath.back() <= ' ')
-		recentPath.pop_back();
+	string recentPath = SaveGameManager::PathToRecent();
 
 	if(recentPath.empty() || !Files::Exists(recentPath))
 	{
@@ -522,43 +526,16 @@ bool PlayerInfo::LoadRecent()
 
 
 
-// Save this player. The file name is based on the player's name.
 void PlayerInfo::Save() const
 {
 	// Don't save dead players or players that are not fully created.
 	if(!CanBeSaved())
 		return;
 
-	// Remember that this was the most recently saved player.
-	Files::Write(Files::Config() / "recent.txt", filePath + '\n');
-
-	if(filePath.rfind(".txt") == filePath.length() - 4)
-	{
-		// Only update the backups if this save will have a newer date.
-		SavedGame saved(filePath);
-		if(saved.GetDate() != date.ToString())
-		{
-			string root = filePath.substr(0, filePath.length() - 4);
-			const int previousCount = Preferences::GetPreviousSaveCount();
-			const string rootPrevious = root + "~~previous-";
-			for(int i = previousCount - 1; i > 0; --i)
-			{
-				const string toMove = rootPrevious + to_string(i) + ".txt";
-				if(Files::Exists(toMove))
-					Files::Move(toMove, rootPrevious + to_string(i + 1) + ".txt");
-			}
-			if(Files::Exists(filePath))
-				Files::Move(filePath, rootPrevious + "1.txt");
-			if(planet->HasServices())
-				Save(rootPrevious + "spaceport.txt");
-		}
-	}
-
-	Save(filePath);
-
-	// Save global conditions:
-	DataWriter globalConditions(Files::Config() / "global conditions.txt");
-	GameData::GlobalConditions().Save(globalConditions);
+	SaveGameManager manager(filePath);
+	DataNode root;
+	this->Save(root);
+	manager.Save(root, date.ToString());
 }
 
 
@@ -574,14 +551,18 @@ string PlayerInfo::Identifier() const
 
 
 
-void PlayerInfo::StartTransaction()
+void PlayerInfo::Autosave() const
 {
-	assert(!transactionSnapshot && "Starting PlayerInfo transaction while one is already active");
+	if(!CanBeSaved() || filePath.length() < 4)
+		return;
 
-	// Create in-memory DataWriter and save to it.
-	transactionSnapshot = new DataWriter();
-	Save(*transactionSnapshot);
+	string path = filePath.substr(0, filePath.length() - 4) + "~autosave.txt";
+	Save(path);
 }
+
+
+
+
 
 
 
@@ -728,25 +709,7 @@ void PlayerInfo::SetName(const string &first, const string &last)
 	firstName = first;
 	lastName = last;
 
-	string fileName = first + " " + last;
-
-	// If there are multiple pilots with the same name, append a number to the
-	// pilot name to generate a unique file name.
-	filePath = (Files::Saves() / fileName).string();
-	int index = 0;
-	while(true)
-	{
-		string path = filePath;
-		if(index++)
-			path += " " + to_string(index);
-		path += ".txt";
-
-		if(!Files::Exists(path))
-		{
-			filePath.swap(path);
-			break;
-		}
-	}
+	filePath = SaveGameManager::GeneratePath(first, last);
 }
 
 
@@ -4360,13 +4323,13 @@ void PlayerInfo::StepMissions(UI *ui)
 
 
 
-void PlayerInfo::Autosave() const
+void PlayerInfo::StartTransaction()
 {
-	if(!CanBeSaved() || filePath.length() < 4)
-		return;
+	assert(!transactionSnapshot && "Starting PlayerInfo transaction while one is already active");
 
-	string path = filePath.substr(0, filePath.length() - 4) + "~autosave.txt";
-	Save(path);
+	// Create in-memory DataNode and save to it.
+	transactionSnapshot = new DataNode();
+	Save(*transactionSnapshot);
 }
 
 
@@ -4374,57 +4337,134 @@ void PlayerInfo::Autosave() const
 void PlayerInfo::Save(const string &filePath) const
 {
 	if(transactionSnapshot)
-		transactionSnapshot->SaveToPath(filePath);
-	else
 	{
 		DataWriter out(filePath);
-		Save(out);
+		out.Write(*transactionSnapshot);
+	}
+	else
+	{
+		DataNode root;
+		Save(root);
+		
+		DataWriter out(filePath);
+		out.Write(root);
 	}
 }
 
 
 
-void PlayerInfo::Save(DataWriter &out) const
+void PlayerInfo::Save(DataNode &out) const
 {
 	// Basic player information and persistent UI settings:
 
 	// Pilot information:
-	out.Write("pilot", firstName, lastName);
-	out.Write("date", date.Day(), date.Month(), date.Year());
-	out.Write("system entry method", EntryToString(entry));
+	{
+		DataNode pilot;
+		pilot.AddToken("pilot");
+		pilot.AddToken(firstName);
+		pilot.AddToken(lastName);
+		out.AddChild(pilot);
+	}
+	{
+		DataNode dateNode;
+		dateNode.AddToken("date");
+		dateNode.AddToken(to_string(date.Day()));
+		dateNode.AddToken(to_string(date.Month()));
+		dateNode.AddToken(to_string(date.Year()));
+		out.AddChild(dateNode);
+	}
+	{
+		DataNode entryNode;
+		entryNode.AddToken("system entry method");
+		entryNode.AddToken(EntryToString(entry));
+		out.AddChild(entryNode);
+	}
 	if(previousSystem)
-		out.Write("previous system", previousSystem->TrueName());
+	{
+		DataNode prev;
+		prev.AddToken("previous system");
+		prev.AddToken(previousSystem->TrueName());
+		out.AddChild(prev);
+	}
 	if(system)
-		out.Write("system", system->TrueName());
+	{
+		DataNode sys;
+		sys.AddToken("system");
+		sys.AddToken(system->TrueName());
+		out.AddChild(sys);
+	}
 	if(planet)
-		out.Write("planet", planet->TrueName());
+	{
+		DataNode plan;
+		plan.AddToken("planet");
+		plan.AddToken(planet->TrueName());
+		out.AddChild(plan);
+	}
 	if(planet && planet->CanUseServices())
-		out.Write("clearance");
-	out.Write("playtime", playTime);
+	{
+		DataNode clearance;
+		clearance.AddToken("clearance");
+		out.AddChild(clearance);
+	}
+	{
+		DataNode play;
+		play.AddToken("playtime");
+		play.AddToken(to_string(playTime));
+		out.AddChild(play);
+	}
 	// This flag is set if the player must leave the planet immediately upon
 	// entering their ship (i.e. because a mission forced them to take off).
 	if(shouldLaunch)
-		out.Write("launching");
-	for(const System *system : travelPlan)
-		out.Write("travel", system->TrueName());
-	if(travelDestination)
-		out.Write("travel destination", travelDestination->TrueName());
-	// Detect which ship number is the current flagship, for showing on LoadPanel.
-	if(flagship)
 	{
-		for(auto it = ships.begin(); it != ships.end(); ++it)
-			if(*it == flagship)
-			{
-				out.Write("flagship index", distance(ships.begin(), it));
-				break;
-			}
+		DataNode launch;
+		launch.AddToken("launching");
+		out.AddChild(launch);
 	}
-	else
-		out.Write("flagship index", -1);
+	for(const System *system : travelPlan)
+	{
+		DataNode travel;
+		travel.AddToken("travel");
+		travel.AddToken(system->TrueName());
+		out.AddChild(travel);
+	}
+	if(travelDestination)
+	{
+		DataNode dest;
+		dest.AddToken("travel destination");
+		dest.AddToken(travelDestination->TrueName());
+		out.AddChild(dest);
+	}
+	// Detect which ship number is the current flagship, for showing on LoadPanel.
+	{
+		DataNode flagIndex;
+		flagIndex.AddToken("flagship index");
+		if(flagship)
+		{
+			for(auto it = ships.begin(); it != ships.end(); ++it)
+				if(*it == flagship)
+				{
+					flagIndex.AddToken(to_string(distance(ships.begin(), it)));
+					break;
+				}
+		}
+		else
+			flagIndex.AddToken("-1");
+		out.AddChild(flagIndex);
+	}
 
 	// Save the current setting for the map coloring;
-	out.Write("map coloring", mapColoring);
-	out.Write("map zoom", mapZoom);
+	{
+		DataNode coloring;
+		coloring.AddToken("map coloring");
+		coloring.AddToken(to_string(mapColoring));
+		out.AddChild(coloring);
+	}
+	{
+		DataNode zoom;
+		zoom.AddToken("map zoom");
+		zoom.AddToken(to_string(mapZoom));
+		out.AddChild(zoom);
+	}
 	// Remember what categories are collapsed.
 	for(const auto &it : collapsed)
 	{
@@ -4432,119 +4472,237 @@ void PlayerInfo::Save(DataWriter &out) const
 		if(it.second.empty())
 			continue;
 
-		out.Write("collapsed", it.first);
-		out.BeginChild();
+		DataNode col;
+		col.AddToken("collapsed");
+		col.AddToken(it.first);
+		for(const auto &cit : it.second)
 		{
-			for(const auto &cit : it.second)
-				out.Write(cit);
+			DataNode item;
+			item.AddToken(cit);
+			col.AddChild(item);
 		}
-		out.EndChild();
+		out.AddChild(col);
 	}
 
-	out.Write("reputation with");
-	out.BeginChild();
 	{
+		DataNode rep;
+		rep.AddToken("reputation with");
 		for(const auto &it : GameData::Governments())
 			if(!it.second.IsPlayer())
-				out.Write(it.first, it.second.Reputation());
+			{
+				DataNode gov;
+				gov.AddToken(it.first);
+				gov.AddToken(to_string(it.second.Reputation()));
+				rep.AddChild(gov);
+			}
+		out.AddChild(rep);
 	}
-	out.EndChild();
 
-	out.Write("tribute received");
-	out.BeginChild();
 	{
+		DataNode trib;
+		trib.AddToken("tribute received");
 		for(const auto &it : tributeReceived)
 			if(it.second > 0)
-				out.Write((it.first)->TrueName(), it.second);
+			{
+				DataNode planetTrib;
+				planetTrib.AddToken((it.first)->TrueName());
+				planetTrib.AddToken(to_string(it.second));
+				trib.AddChild(planetTrib);
+			}
+		out.AddChild(trib);
 	}
-	out.EndChild();
 
 	// Records of things you own:
-	out.Write();
-	out.WriteComment("What you own:");
+	// out.Write();
+	// out.WriteComment("What you own:");
 
 	// Save all the data for all the player's ships.
+	// Note: Ship::Save takes a DataWriter. We need to refactor Ship::Save too?
+	// Or we can use a temporary DataWriter to write to string and parse back? No that's inefficient.
+	// The user request didn't mention Ship::Save.
+	// But PlayerInfo::Save calls ship->Save(out).
+	// If I change PlayerInfo::Save to take DataNode, I can't pass it to ship->Save(DataWriter).
+	// I MUST refactor Ship::Save or use a bridge.
+	// Given the scope, I should probably refactor Ship::Save as well, or use a bridge.
+	// A bridge would be: DataWriter writer; ship->Save(writer); ... parse writer output ...
+	// That's ugly.
+	// Let's assume for now I need to refactor Ship::Save as well?
+	// Wait, the user said "I'd like SaveGameManager::Save to take a data node...".
+	// This implies a deep refactor if everything writes to DataWriter.
+	// But I can't refactor the entire codebase in one go.
+	// Maybe I can make a DataWriter that writes to a DataNode?
+	// DataWriter writes to a stream.
+	// If I modify DataWriter to be able to write to a DataNode...
+	// DataWriter has `std::ostringstream out;`.
+	// It seems hard to make DataWriter write to DataNode directly without changing its implementation significantly.
+	
+	// Let's look at Ship::Save.
+	// If I can't refactor Ship::Save right now, I might have to use a temporary DataWriter.
+	// But wait, I am in the middle of replacing PlayerInfo::Save.
+	// I'll use a temporary hack: write to a stringstream using DataWriter, then parse it into DataNode.
+	// It's not efficient but it works for now until Ship::Save is refactored.
+	// Actually, I can just create a DataWriter, write the ship to it, then parse the string output.
+	
 	for(const shared_ptr<Ship> &ship : ships)
 	{
-		ship->Save(out);
+		DataWriter tempWriter;
+		ship->Save(tempWriter);
+		// We need to parse tempWriter.SaveToString() into DataNodes.
+		// DataFile can load from string.
+		// But DataFile parses a whole file.
+		// ship->Save writes "ship ...".
+		// So DataFile will parse it as a root with one child "ship ...".
+		// We can then take that child and add it to our 'out' node.
+		
+		// This is a bit of a hack but necessary if we don't refactor Ship::Save.
+		// And refactoring Ship::Save might cascade to Outfit::Save, etc.
+		
+		// Let's implement this bridge logic.
+		// But wait, DataWriter writes to a stream.
+		// I can use DataWriter(path) or DataWriter().
+		// DataWriter() writes to memory.
+		
+		// Implementation details:
+		// DataWriter writer;
+		// ship->Save(writer);
+		// string data = writer.SaveToString();
+		// DataFile parser;
+		// parser.LoadData(data); // LoadData is private...
+		// parser.Load(stringstream(data));
+		// for(const DataNode &child : parser) out.AddChild(child);
+		
+		// This seems viable.
+		
+		DataWriter writer;
+		ship->Save(writer);
 		auto it = groups.find(ship.get());
 		if(it != groups.end() && it->second)
-			out.Write("groups", it->second);
+			writer.Write("groups", it->second);
+			
+		std::string data = writer.SaveToString();
+		std::stringstream ss(data);
+		DataFile parser(ss);
+		for(const DataNode &child : parser)
+			out.AddChild(child);
 	}
+	
 	if(!planetaryStorage.empty())
 	{
-		out.Write("storage");
-		out.BeginChild();
-		{
-			for(const auto &it : planetaryStorage)
-				if(!it.second.IsEmpty())
-				{
-					out.Write("planet", it.first->TrueName());
-					out.BeginChild();
-					{
-						it.second.Save(out);
-					}
-					out.EndChild();
-				}
-		}
-		out.EndChild();
+		DataNode storage;
+		storage.AddToken("storage");
+		for(const auto &it : planetaryStorage)
+			if(!it.second.IsEmpty())
+			{
+				DataNode planet;
+				planet.AddToken("planet");
+				planet.AddToken(it.first->TrueName());
+				
+				DataWriter writer;
+				it.second.Save(writer);
+				std::string data = writer.SaveToString();
+				std::stringstream ss(data);
+				DataFile parser(ss);
+				for(const DataNode &child : parser)
+					planet.AddChild(child);
+					
+				storage.AddChild(planet);
+			}
+		out.AddChild(storage);
 	}
 	if(!licenses.empty())
 	{
-		out.Write("licenses");
-		out.BeginChild();
+		DataNode lic;
+		lic.AddToken("licenses");
+		for(const string &license : licenses)
 		{
-			for(const string &license : licenses)
-				out.Write(license);
+			DataNode l;
+			l.AddToken(license);
+			lic.AddChild(l);
 		}
-		out.EndChild();
+		out.AddChild(lic);
 	}
 
 	// Save accounting information, cargo, and cargo cost bases.
-	accounts.Save(out);
-	cargo.Save(out);
+	{
+		DataWriter writer;
+		accounts.Save(writer);
+		cargo.Save(writer);
+		std::string data = writer.SaveToString();
+		std::stringstream ss(data);
+		DataFile parser(ss);
+		for(const DataNode &child : parser)
+			out.AddChild(child);
+	}
+	
 	if(!costBasis.empty())
 	{
-		out.Write("basis");
-		out.BeginChild();
-		{
-			for(const auto &it : costBasis)
-				if(it.second)
-					out.Write(it.first, it.second);
-		}
-		out.EndChild();
+		DataNode basis;
+		basis.AddToken("basis");
+		for(const auto &it : costBasis)
+			if(it.second)
+			{
+				DataNode item;
+				item.AddToken(it.first);
+				item.AddToken(to_string(it.second));
+				basis.AddChild(item);
+			}
+		out.AddChild(basis);
 	}
 
 	if(!stock.empty())
 	{
-		out.Write("stock");
-		out.BeginChild();
-		{
-			using StockElement = pair<const Outfit *const, int>;
-			WriteSorted(stock,
-				[](const StockElement *lhs, const StockElement *rhs)
-					{ return lhs->first->TrueName() < rhs->first->TrueName(); },
-				[&out](const StockElement &it)
-				{
-					if(it.second)
-						out.Write(it.first->TrueName(), it.second);
-				});
-		}
-		out.EndChild();
+		DataNode stk;
+		stk.AddToken("stock");
+		using StockElement = pair<const Outfit *, int>;
+		// We need to sort manually since we are not using WriteSorted helper.
+		vector<StockElement> sortedStock;
+		for(const auto &it : stock)
+			sortedStock.push_back(it);
+		sort(sortedStock.begin(), sortedStock.end(),
+			[](const StockElement &lhs, const StockElement &rhs)
+			{ return lhs.first->TrueName() < rhs.first->TrueName(); });
+			
+		for(const auto &it : sortedStock)
+			if(it.second)
+			{
+				DataNode item;
+				item.AddToken(it.first->TrueName());
+				item.AddToken(to_string(it.second));
+				stk.AddChild(item);
+			}
+		out.AddChild(stk);
 	}
-	depreciation.Save(out, date.DaysSinceEpoch());
-	stockDepreciation.Save(out, date.DaysSinceEpoch());
+	
+	{
+		DataWriter writer;
+		depreciation.Save(writer, date.DaysSinceEpoch());
+		stockDepreciation.Save(writer, date.DaysSinceEpoch());
+		std::string data = writer.SaveToString();
+		std::stringstream ss(data);
+		DataFile parser(ss);
+		for(const DataNode &child : parser)
+			out.AddChild(child);
+	}
 
 
 	// Records of things you have done or are doing, or have happened to you:
-	out.Write();
-	out.WriteComment("What you've done:");
+	// out.Write();
+	// out.WriteComment("What you've done:");
 
 	// Save all missions (accepted, accepted-but-invalid, and available).
-	for(const Mission &mission : missions)
-		mission.Save(out);
-	for(const Mission &mission : inactiveMissions)
-		mission.Save(out);
+	{
+		DataWriter writer;
+		for(const Mission &mission : missions)
+			mission.Save(writer);
+		for(const Mission &mission : inactiveMissions)
+			mission.Save(writer);
+		std::string data = writer.SaveToString();
+		std::stringstream ss(data);
+		DataFile parser(ss);
+		for(const DataNode &child : parser)
+			out.AddChild(child);
+	}
+	
 	map<string, map<string, int>> offWorldMissionCargo;
 	map<string, map<string, int>> offWorldMissionPassengers;
 	for(const auto &it : ships)
@@ -4558,168 +4716,272 @@ void PlayerInfo::Save(DataWriter &out) const
 		for(const auto &passengers : ship.Cargo().PassengerList())
 			offWorldMissionPassengers[passengers.first->UUID().ToString()][ship.UUID().ToString()] = passengers.second;
 	}
+	
 	auto SaveMissionCargoDistribution = [&out](const map<string, map<string, int>> &toSave, bool passengers) -> void
 	{
+		DataNode dist;
 		if(passengers)
-			out.Write("mission passengers");
+			dist.AddToken("mission passengers");
 		else
-			out.Write("mission cargo");
-		out.BeginChild();
-		{
-			out.Write("player ships");
-			out.BeginChild();
+			dist.AddToken("mission cargo");
+		
+		DataNode playerShips;
+		playerShips.AddToken("player ships");
+		
+		for(const auto &it : toSave)
+			for(const auto &sit : it.second)
 			{
-				for(const auto &it : toSave)
-					for(const auto &sit : it.second)
-						out.Write(it.first, sit.first, sit.second);
+				DataNode item;
+				item.AddToken(it.first);
+				item.AddToken(sit.first);
+				item.AddToken(to_string(sit.second));
+				playerShips.AddChild(item);
 			}
-			out.EndChild();
-		}
-		out.EndChild();
+		dist.AddChild(playerShips);
+		out.AddChild(dist);
 	};
 	if(!offWorldMissionCargo.empty())
 		SaveMissionCargoDistribution(offWorldMissionCargo, false);
 	if(!offWorldMissionPassengers.empty())
 		SaveMissionCargoDistribution(offWorldMissionPassengers, true);
 
-	for(const Mission &mission : availableJobs)
-		mission.Save(out, "available job");
-	for(const Mission &mission : availableMissions)
-		mission.Save(out, "available mission");
-	out.Write("sort type", static_cast<int>(availableSortType));
+	{
+		DataWriter writer;
+		for(const Mission &mission : availableJobs)
+			mission.Save(writer, "available job");
+		for(const Mission &mission : availableMissions)
+			mission.Save(writer, "available mission");
+		std::string data = writer.SaveToString();
+		std::stringstream ss(data);
+		DataFile parser(ss);
+		for(const DataNode &child : parser)
+			out.AddChild(child);
+	}
+	
+	{
+		DataNode sortType;
+		sortType.AddToken("sort type");
+		sortType.AddToken(to_string(static_cast<int>(availableSortType)));
+		out.AddChild(sortType);
+	}
 	if(!availableSortAsc)
-		out.Write("sort descending");
+	{
+		DataNode sortDesc;
+		sortDesc.AddToken("sort descending");
+		out.AddChild(sortDesc);
+	}
 	if(sortSeparateDeadline)
-		out.Write("separate deadline");
+	{
+		DataNode sepDead;
+		sepDead.AddToken("separate deadline");
+		out.AddChild(sepDead);
+	}
 	if(sortSeparatePossible)
-		out.Write("separate possible");
+	{
+		DataNode sepPoss;
+		sepPoss.AddToken("separate possible");
+		out.AddChild(sepPoss);
+	}
 
 	// Save any "primary condition" flags that are set.
-	conditions.Save(out);
+	{
+		DataWriter writer;
+		conditions.Save(writer);
+		std::string data = writer.SaveToString();
+		std::stringstream ss(data);
+		DataFile parser(ss);
+		for(const DataNode &child : parser)
+			out.AddChild(child);
+	}
 
 	// Save the UUID of any ships given to the player with a specified name, and ship class.
 	if(!giftedShips.empty())
 	{
-		out.Write("gifted ships");
-		out.BeginChild();
+		DataNode gifted;
+		gifted.AddToken("gifted ships");
+		for(const auto &it : giftedShips)
 		{
-			for(const auto &it : giftedShips)
-				out.Write(it.first, it.second.ToString());
+			DataNode item;
+			item.AddToken(it.first);
+			item.AddToken(it.second.ToString());
+			gifted.AddChild(item);
 		}
-		out.EndChild();
+		out.AddChild(gifted);
 	}
 
 	// Save pending events, and changes that have happened due to past events.
-	for(const GameEvent &event : gameEvents)
-		event.Save(out);
+	{
+		DataWriter writer;
+		for(const GameEvent &event : gameEvents)
+			event.Save(writer);
+		std::string data = writer.SaveToString();
+		std::stringstream ss(data);
+		DataFile parser(ss);
+		for(const DataNode &child : parser)
+			out.AddChild(child);
+	}
+	
 	if(!dataChanges.empty())
 	{
-		out.Write("changes");
-		out.BeginChild();
-		{
-			for(const DataNode &node : dataChanges)
-				out.Write(node);
-		}
-		out.EndChild();
+		DataNode changes;
+		changes.AddToken("changes");
+		for(const DataNode &node : dataChanges)
+			changes.AddChild(node);
+		out.AddChild(changes);
 	}
-	GameData::WriteEconomy(out);
+	
+	{
+		DataWriter writer;
+		GameData::WriteEconomy(writer);
+		std::string data = writer.SaveToString();
+		std::stringstream ss(data);
+		DataFile parser(ss);
+		for(const DataNode &child : parser)
+			out.AddChild(child);
+	}
 
 	// Check which persons have been captured or destroyed.
 	for(const auto &it : GameData::Persons())
 		if(it.second.IsDestroyed())
-			out.Write("destroyed", it.first);
+		{
+			DataNode dest;
+			dest.AddToken("destroyed");
+			dest.AddToken(it.first);
+			out.AddChild(dest);
+		}
 
 
 	// Records of things you have discovered:
-	out.Write();
-	out.WriteComment("What you know:");
+	// out.Write();
+	// out.WriteComment("What you know:");
 
 	// Save a list of systems the player has visited.
-	WriteSorted(visitedSystems,
-		[](const System *const *lhs, const System *const *rhs)
-			{ return (*lhs)->TrueName() < (*rhs)->TrueName(); },
-		[&out](const System *system)
+	{
+		vector<const System *> sortedVisited(visitedSystems.begin(), visitedSystems.end());
+		sort(sortedVisited.begin(), sortedVisited.end(),
+			[](const System *lhs, const System *rhs)
+			{ return lhs->TrueName() < rhs->TrueName(); });
+			
+		for(const System *system : sortedVisited)
 		{
-			out.Write("visited", system->TrueName());
-		});
+			DataNode visited;
+			visited.AddToken("visited");
+			visited.AddToken(system->TrueName());
+			out.AddChild(visited);
+		}
+	}
 
 	// Save a list of planets the player has visited.
-	WriteSorted(visitedPlanets,
-		[](const Planet *const *lhs, const Planet *const *rhs)
-			{ return (*lhs)->TrueName() < (*rhs)->TrueName(); },
-		[&out](const Planet *planet)
+	{
+		vector<const Planet *> sortedVisited(visitedPlanets.begin(), visitedPlanets.end());
+		sort(sortedVisited.begin(), sortedVisited.end(),
+			[](const Planet *lhs, const Planet *rhs)
+			{ return lhs->TrueName() < rhs->TrueName(); });
+			
+		for(const Planet *planet : sortedVisited)
 		{
-			out.Write("visited planet", planet->TrueName());
-		});
+			DataNode visited;
+			visited.AddToken("visited planet");
+			visited.AddToken(planet->TrueName());
+			out.AddChild(visited);
+		}
+	}
 
 	if(!harvested.empty())
 	{
-		out.Write("harvested");
-		out.BeginChild();
+		DataNode harv;
+		harv.AddToken("harvested");
+		
+		using HarvestLog = pair<const System *, const Outfit *>;
+		vector<HarvestLog> sortedHarvested(harvested.begin(), harvested.end());
+		sort(sortedHarvested.begin(), sortedHarvested.end(),
+			[](const HarvestLog &lhs, const HarvestLog &rhs) -> bool
+			{
+				// Sort by system name and then by outfit name.
+				if(lhs.first != rhs.first)
+					return lhs.first->TrueName() < rhs.first->TrueName();
+				else
+					return lhs.second->TrueName() < rhs.second->TrueName();
+			});
+			
+		for(const HarvestLog &it : sortedHarvested)
 		{
-			using HarvestLog = pair<const System *, const Outfit *>;
-			WriteSorted(harvested,
-				[](const HarvestLog *lhs, const HarvestLog *rhs) -> bool
-				{
-					// Sort by system name and then by outfit name.
-					if(lhs->first != rhs->first)
-						return lhs->first->TrueName() < rhs->first->TrueName();
-					else
-						return lhs->second->TrueName() < rhs->second->TrueName();
-				},
-				[&out](const HarvestLog &it)
-				{
-					out.Write(it.first->TrueName(), it.second->TrueName());
-				});
+			DataNode item;
+			item.AddToken(it.first->TrueName());
+			item.AddToken(it.second->TrueName());
+			harv.AddChild(item);
 		}
-		out.EndChild();
+		out.AddChild(harv);
 	}
 
-	out.Write("logbook");
-	out.BeginChild();
 	{
+		DataNode log;
+		log.AddToken("logbook");
 		for(auto &&it : logbook)
 		{
-			out.Write(it.first.Day(), it.first.Month(), it.first.Year());
-			out.BeginChild();
+			DataNode entry;
+			entry.AddToken(to_string(it.first.Day()));
+			entry.AddToken(to_string(it.first.Month()));
+			entry.AddToken(to_string(it.first.Year()));
+			
+			// Break the text up into paragraphs.
+			for(const string &line : Format::Split(it.second, "\n\t"))
 			{
-				// Break the text up into paragraphs.
-				for(const string &line : Format::Split(it.second, "\n\t"))
-					out.Write(line);
+				DataNode lineNode;
+				lineNode.AddToken(line);
+				entry.AddChild(lineNode);
 			}
-			out.EndChild();
+			log.AddChild(entry);
 		}
 		for(auto &&it : specialLogs)
 			for(auto &&eit : it.second)
 			{
-				out.Write(it.first, eit.first);
-				out.BeginChild();
+				DataNode entry;
+				entry.AddToken(it.first);
+				entry.AddToken(eit.first);
+				
+				// Break the text up into paragraphs.
+				for(const string &line : Format::Split(eit.second, "\n\t"))
 				{
-					// Break the text up into paragraphs.
-					for(const string &line : Format::Split(eit.second, "\n\t"))
-						out.Write(line);
+					DataNode lineNode;
+					lineNode.AddToken(line);
+					entry.AddChild(lineNode);
 				}
-				out.EndChild();
+				log.AddChild(entry);
 			}
+		out.AddChild(log);
 	}
-	out.EndChild();
 
-	out.Write();
-	out.WriteComment("How you began:");
-	startData.Save(out);
+	// out.Write();
+	// out.WriteComment("How you began:");
+	{
+		DataWriter writer;
+		startData.Save(writer);
+		std::string data = writer.SaveToString();
+		std::stringstream ss(data);
+		DataFile parser(ss);
+		for(const DataNode &child : parser)
+			out.AddChild(child);
+	}
 
 	// Write plugins to player's save file for debugging.
-	out.Write();
-	out.WriteComment("Installed plugins:");
-	out.Write("plugins");
-	out.BeginChild();
-	for(const auto &it : Plugins::Get())
+	// out.Write();
+	// out.WriteComment("Installed plugins:");
 	{
-		const auto &plugin = it.second;
-		if(plugin.IsValid() && plugin.enabled)
-			out.Write(plugin.name);
+		DataNode plugins;
+		plugins.AddToken("plugins");
+		for(const auto &it : Plugins::Get())
+		{
+			const auto &plugin = it.second;
+			if(plugin.IsValid() && plugin.enabled)
+			{
+				DataNode plug;
+				plug.AddToken(plugin.name);
+				plugins.AddChild(plug);
+			}
+		}
+		out.AddChild(plugins);
 	}
-	out.EndChild();
 }
 
 
