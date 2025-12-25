@@ -264,6 +264,8 @@ target_sources(EndlessSkyLib PRIVATE
 	SavedGame.h
 	SaveGameManager.cpp
 	SaveGameManager.h
+	git/GitHelper.cpp
+	git/GitHelper.h
 	Screen.cpp
 	Screen.h
 	ScrollBar.cpp

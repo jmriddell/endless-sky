@@ -67,13 +67,16 @@ private:
 	void DeletePilot(const std::string &);
 	void DeleteSave();
 
+	void LoadPreview(const std::string &identifier);
+
+protected:
+	std::map<std::string, std::vector<std::pair<std::string, std::filesystem::file_time_type>>> files;
 
 private:
 	PlayerInfo &player;
 	SavedGame loadedInfo;
 	UI &gamePanels;
 
-	std::map<std::string, std::vector<std::pair<std::string, std::filesystem::file_time_type>>> files;
 	std::string selectedPilot;
 	std::string selectedFile;
 	// If the player enters a filename that exists, prompt before overwriting it.

@@ -22,6 +22,7 @@ this program. If not, see <https://www.gnu.org/licenses/>.
 #include "GameData.h"
 #include "Preferences.h"
 #include "SavedGame.h"
+#include "git/GitHelper.h"
 
 using namespace std;
 
@@ -42,52 +43,15 @@ void SaveGameManager::Save(const DataNode &root, const string &dateString)
 	GameData::GlobalConditions().Save(globalConditions);
 
 	// Initialize git and commit the changes
-	git_libgit2_init();
+	GitHelper::Init();
 
 	filesystem::path savePath(savename);
 	filesystem::path repoPath = savePath.parent_path();
 	string filename = savePath.filename().string();
 
-	git_repository *repo = nullptr;
-	if (git_repository_open(&repo, repoPath.string().c_str()) != 0) {
-		git_repository_init(&repo, repoPath.string().c_str(), 0);
-	}
+	GitHelper::CreateCommit(repoPath, filename, dateString);
 
-	if (repo) {
-		git_index *index = nullptr;
-		if (git_repository_index(&index, repo) == 0) {
-			git_index_add_bypath(index, filename.c_str());
-			git_index_write(index);
-
-			git_oid tree_oid;
-			git_index_write_tree(&tree_oid, index);
-			git_tree *tree = nullptr;
-			git_tree_lookup(&tree, repo, &tree_oid);
-
-			git_signature *sig = nullptr;
-			git_signature_now(&sig, "Endless Sky", "endless-sky@localhost");
-
-			git_oid parent_oid;
-			git_commit *parent = nullptr;
-			if (git_reference_name_to_id(&parent_oid, repo, "HEAD") == 0) {
-				git_commit_lookup(&parent, repo, &parent_oid);
-			}
-
-			git_oid commit_oid;
-			// Use the date string as the commit message
-			git_commit_create_v(
-				&commit_oid, repo, "HEAD", sig, sig,
-				NULL, dateString.c_str(), tree, parent ? 1 : 0, parent);
-
-			git_commit_free(parent);
-			git_signature_free(sig);
-			git_tree_free(tree);
-			git_index_free(index);
-		}
-		git_repository_free(repo);
-	}
-
-	git_libgit2_shutdown();
+	GitHelper::Shutdown();
 }
 
 void SaveGameManager::UpdateRecentSave()
