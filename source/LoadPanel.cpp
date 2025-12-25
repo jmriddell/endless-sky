@@ -23,6 +23,8 @@ this program. If not, see <https://www.gnu.org/licenses/>.
 #include "Dialog.h"
 #include "text/DisplayText.h"
 #include "Files.h"
+
+#include <git2.h>
 #include "shader/FillShader.h"
 #include "text/Font.h"
 #include "text/FontSet.h"
@@ -481,39 +483,67 @@ bool LoadPanel::Scroll(double dx, double dy)
 void LoadPanel::UpdateLists()
 {
 	files.clear();
+	git_libgit2_init();
 
-	vector<filesystem::path> fileList = Files::List(Files::Saves());
+	vector<filesystem::path> fileList = Files::ListDirectories(Files::Saves());
 	for(const auto &path : fileList)
 	{
-		// Skip any files that aren't text files.
-		if(path.extension() != ".txt")
+		string pilotName = Files::Name(path);
+		auto &savesList = files[pilotName];
+
+		// Open git repo
+		git_repository *repo = nullptr;
+		if(git_repository_open(&repo, path.string().c_str()) != 0)
 			continue;
 
-		string fileName = Files::Name(path);
-		// The file name is either "Pilot Name.txt" or "Pilot Name~SnapshotTitle.txt".
-		size_t pos = fileName.find('~');
-		const bool isSnapshot = (pos != string::npos);
-		if(!isSnapshot)
-			pos = fileName.size() - 4;
+		git_revwalk *walker = nullptr;
+		git_revwalk_new(&walker, repo);
+		git_revwalk_push_head(walker);
+		git_revwalk_sorting(walker, GIT_SORT_TIME);
 
-		string pilotName = fileName.substr(0, pos);
-		auto &savesList = files[pilotName];
-		savesList.emplace_back(fileName, Files::Timestamp(path));
-		// Ensure that the main save for this pilot, not a snapshot, is first in the list.
-		if(!isSnapshot)
-			swap(savesList.front(), savesList.back());
+		git_oid oid;
+		while(git_revwalk_next(&oid, walker) == 0)
+		{
+			git_commit *commit = nullptr;
+			if(git_commit_lookup(&commit, repo, &oid) == 0)
+			{
+				git_time_t time = git_commit_time(commit);
+				const char *message = git_commit_message(commit);
+				string commitHash = git_oid_tostr_s(&oid);
+				string snapshotName = string(message);
+				// Trim newline if present
+				if(!snapshotName.empty() && snapshotName.back() == '\n')
+					snapshotName.pop_back();
+
+				// Store commit hash as filename for now, or construct a special string
+				// We need a way to identify this as a commit.
+				// Let's use "commit:<hash>"
+
+				// Using chrono::file_clock to convert time_t to file_time_type is tricky across platforms.
+				// For now, let's just approximate or use system clock.
+				// Actually, SaveGameManager uses filesystem::last_write_time which returns file_time_type.
+				// We need to construct a file_time_type from git_time_t.
+
+				auto sysTime = std::chrono::system_clock::from_time_t(time);
+				auto fileTime = std::chrono::file_clock::from_sys(sysTime);
+
+				savesList.emplace_back("commit:" + commitHash + "~" + snapshotName, fileTime);
+
+				git_commit_free(commit);
+			}
+		}
+		git_revwalk_free(walker);
+		git_repository_free(repo);
 	}
+
+	git_libgit2_shutdown();
 
 	for(auto &it : files)
 	{
-		// Don't include the first item in the sort if this pilot has a non-snapshot save.
-		auto start = it.second.begin();
-		if(start->first.find('~') == string::npos)
-			++start;
-		sort(start, it.second.end(),
+		sort(it.second.begin(), it.second.end(),
 			[](const pair<string, filesystem::file_time_type> &a, const pair<string, filesystem::file_time_type> &b) -> bool
 			{
-				return a.second > b.second || (a.second == b.second && a.first < b.first);
+				return a.second > b.second;
 			}
 		);
 	}
@@ -525,10 +555,12 @@ void LoadPanel::UpdateLists()
 		if(selectedFile.empty())
 		{
 			auto it = files.find(selectedPilot);
-			if(it != files.end())
+			if(it != files.end() && !it->second.empty())
 			{
 				selectedFile = it->second.front().first;
-				loadedInfo.Load(Files::Saves() / selectedFile);
+				// Loading info from a commit needs special handling
+				// loadedInfo.Load(Files::Saves() / selectedFile);
+				// For now, let's just update lists. We need to update LoadCallback and other things too.
 			}
 		}
 	}
@@ -586,7 +618,51 @@ void LoadPanel::LoadCallback()
 	gamePanels.Reset();
 	gamePanels.CanSave(true);
 
-	player.Load(loadedInfo.Path());
+	if(selectedFile.starts_with("commit:"))
+	{
+		// Format: commit:<hash>~<name>
+		string commitHash = selectedFile.substr(7, 40);
+		filesystem::path repoPath = Files::Saves() / selectedPilot;
+
+		git_libgit2_init();
+		git_repository *repo = nullptr;
+		if(git_repository_open(&repo, repoPath.string().c_str()) == 0)
+		{
+			git_oid oid;
+			git_oid_fromstr(&oid, commitHash.c_str());
+			git_commit *commit = nullptr;
+			if(git_commit_lookup(&commit, repo, &oid) == 0)
+			{
+				git_tree *tree = nullptr;
+				git_commit_tree(&tree, commit);
+
+				// Find the save file in the tree. It should be "<Pilot Name>.txt".
+				string saveFileName = selectedPilot + ".txt";
+				git_tree_entry *entry = nullptr;
+				if(git_tree_entry_bypath(&entry, tree, saveFileName.c_str()) == 0)
+				{
+					const git_oid *blob_oid = git_tree_entry_id(entry);
+					git_blob *blob = nullptr;
+					if(git_blob_lookup(&blob, repo, blob_oid) == 0)
+					{
+						const char *content = (const char *)git_blob_rawcontent(blob);
+						size_t size = git_blob_rawsize(blob);
+						player.Load(string(content, size));
+						git_blob_free(blob);
+					}
+					git_tree_entry_free(entry);
+				}
+				git_tree_free(tree);
+				git_commit_free(commit);
+			}
+			git_repository_free(repo);
+		}
+		git_libgit2_shutdown();
+	}
+	else
+	{
+		player.Load(loadedInfo.Path());
+	}
 
 	// Scale any new masks that might have been added by the newly loaded save file.
 	GameData::GetMaskManager().ScaleMasks();

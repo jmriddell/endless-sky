@@ -18,6 +18,8 @@ this program. If not, see <https://www.gnu.org/licenses/>.
 #include "DataFile.h"
 #include "DataNode.h"
 
+#include <git2.h>
+
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -37,6 +39,5 @@ public:
 private:
 	std::string savename;
 
-	void RotateBackups(const std::string &dateString);
 	void UpdateRecentSave();
 };

@@ -33,7 +33,6 @@ SaveGameManager::SaveGameManager(const string &savename)
 void SaveGameManager::Save(const DataNode &root, const string &dateString)
 {
 	UpdateRecentSave();
-	RotateBackups(dateString);
 
 	DataWriter out(savename);
 	out.Write(root);
@@ -41,29 +40,54 @@ void SaveGameManager::Save(const DataNode &root, const string &dateString)
 	// Save global conditions:
 	DataWriter globalConditions(Files::Config() / "global conditions.txt");
 	GameData::GlobalConditions().Save(globalConditions);
-}
 
-void SaveGameManager::RotateBackups(const string &dateString)
-{
-	if(savename.rfind(".txt") != savename.length() - 4)
-		return;
+	// Initialize git and commit the changes
+	git_libgit2_init();
 
-	// Only update the backups if this save will have a newer date.
-	SavedGame saved(savename);
-	if(saved.GetDate() == dateString)
-		return;
+	filesystem::path savePath(savename);
+	filesystem::path repoPath = savePath.parent_path();
+	string filename = savePath.filename().string();
 
-	string root = savename.substr(0, savename.length() - 4);
-	const int previousCount = Preferences::GetPreviousSaveCount();
-	const string rootPrevious = root + "~~previous-";
-	for(int i = previousCount - 1; i > 0; --i)
-	{
-		const string toMove = rootPrevious + to_string(i) + ".txt";
-		if(Files::Exists(toMove))
-			Files::Move(toMove, rootPrevious + to_string(i + 1) + ".txt");
+	git_repository *repo = nullptr;
+	if (git_repository_open(&repo, repoPath.string().c_str()) != 0) {
+		git_repository_init(&repo, repoPath.string().c_str(), 0);
 	}
-	if(Files::Exists(savename))
-		Files::Move(savename, rootPrevious + "1.txt");
+
+	if (repo) {
+		git_index *index = nullptr;
+		if (git_repository_index(&index, repo) == 0) {
+			git_index_add_bypath(index, filename.c_str());
+			git_index_write(index);
+
+			git_oid tree_oid;
+			git_index_write_tree(&tree_oid, index);
+			git_tree *tree = nullptr;
+			git_tree_lookup(&tree, repo, &tree_oid);
+
+			git_signature *sig = nullptr;
+			git_signature_now(&sig, "Endless Sky", "endless-sky@localhost");
+
+			git_oid parent_oid;
+			git_commit *parent = nullptr;
+			if (git_reference_name_to_id(&parent_oid, repo, "HEAD") == 0) {
+				git_commit_lookup(&parent, repo, &parent_oid);
+			}
+
+			git_oid commit_oid;
+			// Use the date string as the commit message
+			git_commit_create_v(
+				&commit_oid, repo, "HEAD", sig, sig,
+				NULL, dateString.c_str(), tree, parent ? 1 : 0, parent);
+
+			git_commit_free(parent);
+			git_signature_free(sig);
+			git_tree_free(tree);
+			git_index_free(index);
+		}
+		git_repository_free(repo);
+	}
+
+	git_libgit2_shutdown();
 }
 
 void SaveGameManager::UpdateRecentSave()
@@ -107,20 +131,23 @@ string SaveGameManager::PathToRecent()
 
 string SaveGameManager::GeneratePath(const string &first, const string &last)
 {
-	string fileName = first + " " + last;
+	string folderName = first + " " + last;
 
 	// If there are multiple pilots with the same name, append a number to the
-	// pilot name to generate a unique file name.
-	string filePath = (Files::Saves() / fileName).string();
+	// pilot name to generate a unique folder name.
+	string folderPath = (Files::Saves() / folderName).string();
 	int index = 0;
 	while(true)
 	{
-		string path = filePath;
+		string path = folderPath;
 		if(index++)
 			path += " " + to_string(index);
-		path += ".txt";
 
-		if(!Files::Exists(path))
-			return path;
+		if(!Files::Exists(path)) {
+			// Create the directory
+			filesystem::create_directories(path);
+			// Return the path to the save file within that directory
+			return (filesystem::path(path) / (folderName + ".txt")).string();
+		}
 	}
 }
