@@ -505,11 +505,50 @@ void LoadPanel::UpdateLists()
 			swap(savesList.front(), savesList.back());
 	}
 
+	// Also check for git-based saves in directories
+	vector<filesystem::path> dirList = Files::ListDirectories(Files::Saves());
+
+	if(!dirList.empty())
+	{
+		GitHelper::Init();
+		for(const auto &path : dirList)
+		{
+			if(GitHelper::IsRepo(path))
+			{
+				string pilotName = Files::Name(path);
+				auto commits = GitHelper::ListCommits(path);
+				if(commits.empty())
+					continue;
+
+				auto &savesList = files[pilotName];
+
+				// Also include the current "working copy" (the actual file on disk) as the main save
+				// The file should be at saves/PilotName/PilotName.txt
+				filesystem::path mainSavePath = path / (pilotName + ".txt");
+				if (Files::Exists(mainSavePath))
+				{
+					// Use relative path so LoadCallback can find it in the subdirectory
+					string relativePath = (filesystem::path(pilotName) / (pilotName + ".txt")).string();
+					savesList.emplace_back(relativePath, Files::Timestamp(mainSavePath));
+				}
+
+				for(const auto &commit : commits)
+				{
+					// Use clock_cast for correct C++20 conversion
+					auto sys_time = commit.second;
+					auto file_time = chrono::clock_cast<chrono::file_clock>(sys_time);
+					savesList.emplace_back(commit.first, file_time);
+				}
+			}
+		}
+		GitHelper::Shutdown();
+	}
+
 	for(auto &it : files)
 	{
 		// Don't include the first item in the sort if this pilot has a non-snapshot save.
 		auto start = it.second.begin();
-		if(start->first.find('~') == string::npos)
+		if(start->first.find('~') == string::npos && !start->first.starts_with("commit:"))
 			++start;
 		sort(start, it.second.end(),
 			[](const pair<string, filesystem::file_time_type> &a, const pair<string, filesystem::file_time_type> &b) -> bool
@@ -587,7 +626,27 @@ void LoadPanel::LoadCallback()
 	gamePanels.Reset();
 	gamePanels.CanSave(true);
 
-	player.Load(loadedInfo.Path());
+	if(selectedFile.starts_with("commit:"))
+	{
+		string commitHash = selectedFile.substr(7, 40);
+		filesystem::path repoPath = Files::Saves() / selectedPilot;
+
+		GitHelper::Init();
+		string saveFileName = selectedPilot + ".txt";
+		string content = GitHelper::GetFileContent(repoPath, commitHash, saveFileName);
+		GitHelper::Shutdown();
+
+		if (!content.empty()) {
+			player.Load(content);
+		} else {
+			// Fallback or error handling
+			player.Load(loadedInfo.Path());
+		}
+	}
+	else
+	{
+		player.Load(loadedInfo.Path());
+	}
 
 	// Scale any new masks that might have been added by the newly loaded save file.
 	GameData::GetMaskManager().ScaleMasks();
@@ -612,12 +671,29 @@ void LoadPanel::DeletePilot(const string &)
 		return;
 
 	bool failed = false;
+
+	// Check if this is a directory-based pilot (git repo)
+	filesystem::path dirPath = Files::Saves() / selectedPilot;
+	if(Files::Exists(dirPath) && filesystem::is_directory(dirPath))
+	{
+		Files::Delete(dirPath);
+		failed |= Files::Exists(dirPath);
+	}
+
+	// Also delete any legacy files for the same pilot name
 	for(const auto &fit : it->second)
 	{
+		if(fit.first.starts_with("commit:")) continue;
+		// If we already deleted the directory, and this entry was in it, it's gone.
+		// But if it's a legacy file (ends in .txt and not inside the directory?), it might be at root.
 		filesystem::path path = Files::Saves() / fit.first;
-		Files::Delete(path);
-		failed |= Files::Exists(path);
+		if(Files::Exists(path))
+		{
+			Files::Delete(path);
+			failed |= Files::Exists(path);
+		}
 	}
+
 	if(failed)
 		GetUI()->Push(new Dialog("Deleting pilot files failed."));
 
@@ -631,6 +707,12 @@ void LoadPanel::DeletePilot(const string &)
 
 void LoadPanel::DeleteSave()
 {
+	if(selectedFile.starts_with("commit:"))
+	{
+		GetUI()->Push(new Dialog("Deleting individual git snapshots is not yet supported."));
+		return;
+	}
+
 	loadedInfo.Clear();
 	string pilot = selectedPilot;
 	filesystem::path path = Files::Saves() / selectedFile;

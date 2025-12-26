@@ -40,6 +40,7 @@ target_sources(EndlessSkyTests PRIVATE
 	unit/src/test_random.cpp
 	unit/src/test_saveGameManager.cpp
 	unit/src/test_save_git.cpp
+	unit/src/test_load_logic.cpp
 	unit/src/test_scrollVar.cpp
 	unit/src/test_set.cpp
 	unit/src/test_ship.cpp

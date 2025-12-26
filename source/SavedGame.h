@@ -33,6 +33,7 @@ public:
 	explicit SavedGame(const std::filesystem::path &path);
 
 	void Load(const std::filesystem::path &path);
+	void Load(const std::string &data);
 	const std::filesystem::path &Path() const;
 	bool IsLoaded() const;
 	void Clear();

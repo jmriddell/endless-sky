@@ -24,6 +24,8 @@ this program. If not, see <https://www.gnu.org/licenses/>.
 #include "SavedGame.h"
 #include "git/GitHelper.h"
 
+#include <filesystem>
+
 using namespace std;
 
 SaveGameManager::SaveGameManager(const string &savename)
@@ -35,23 +37,28 @@ void SaveGameManager::Save(const DataNode &root, const string &dateString)
 {
 	UpdateRecentSave();
 
-	DataWriter out(savename);
-	out.Write(root);
+	{
+		DataWriter out(savename);
+		out.Write(root);
 
-	// Save global conditions:
-	DataWriter globalConditions(Files::Config() / "global conditions.txt");
-	GameData::GlobalConditions().Save(globalConditions);
+		// Save global conditions:
+		DataWriter globalConditions(Files::Config() / "global conditions.txt");
+		GameData::GlobalConditions().Save(globalConditions);
+	}
 
 	// Initialize git and commit the changes
-	GitHelper::Init();
-
+	// Only do this if we are in a dedicated subdirectory to avoid making the root saves folder a git repo
 	filesystem::path savePath(savename);
 	filesystem::path repoPath = savePath.parent_path();
-	string filename = savePath.filename().string();
 
-	GitHelper::CreateCommit(repoPath, filename, dateString);
-
-	GitHelper::Shutdown();
+	// Check if repoPath is equivalent to Files::Saves()
+	if (repoPath != Files::Saves())
+	{
+		GitHelper::Init();
+		string filename = savePath.filename().string();
+		GitHelper::CreateCommit(repoPath, filename, dateString);
+		GitHelper::Shutdown();
+	}
 }
 
 void SaveGameManager::UpdateRecentSave()
