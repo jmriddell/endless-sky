@@ -89,6 +89,7 @@ public:
 	void New(const StartConditions &start);
 	// Load an existing player.
 	void Load(const std::filesystem::path &path);
+	void Load(const std::string &blob);
 	void Load(const DataNode &root);
 	// Load the most recently saved player. If no save could be loaded, returns false.
 	bool LoadRecent();

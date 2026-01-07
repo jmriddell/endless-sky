@@ -37,6 +37,5 @@ public:
 private:
 	std::string savename;
 
-	void RotateBackups(const std::string &dateString);
 	void UpdateRecentSave();
 };

@@ -22,6 +22,9 @@ this program. If not, see <https://www.gnu.org/licenses/>.
 #include "GameData.h"
 #include "Preferences.h"
 #include "SavedGame.h"
+#include "git/GitHelper.h"
+
+#include <filesystem>
 
 using namespace std;
 
@@ -33,37 +36,29 @@ SaveGameManager::SaveGameManager(const string &savename)
 void SaveGameManager::Save(const DataNode &root, const string &dateString)
 {
 	UpdateRecentSave();
-	RotateBackups(dateString);
 
-	DataWriter out(savename);
-	out.Write(root);
-
-	// Save global conditions:
-	DataWriter globalConditions(Files::Config() / "global conditions.txt");
-	GameData::GlobalConditions().Save(globalConditions);
-}
-
-void SaveGameManager::RotateBackups(const string &dateString)
-{
-	if(savename.rfind(".txt") != savename.length() - 4)
-		return;
-
-	// Only update the backups if this save will have a newer date.
-	SavedGame saved(savename);
-	if(saved.GetDate() == dateString)
-		return;
-
-	string root = savename.substr(0, savename.length() - 4);
-	const int previousCount = Preferences::GetPreviousSaveCount();
-	const string rootPrevious = root + "~~previous-";
-	for(int i = previousCount - 1; i > 0; --i)
 	{
-		const string toMove = rootPrevious + to_string(i) + ".txt";
-		if(Files::Exists(toMove))
-			Files::Move(toMove, rootPrevious + to_string(i + 1) + ".txt");
+		DataWriter out(savename);
+		out.Write(root);
+
+		// Save global conditions:
+		DataWriter globalConditions(Files::Config() / "global conditions.txt");
+		GameData::GlobalConditions().Save(globalConditions);
 	}
-	if(Files::Exists(savename))
-		Files::Move(savename, rootPrevious + "1.txt");
+
+	// Initialize git and commit the changes
+	// Only do this if we are in a dedicated subdirectory to avoid making the root saves folder a git repo
+	filesystem::path savePath(savename);
+	filesystem::path repoPath = savePath.parent_path();
+
+	// Check if repoPath is equivalent to Files::Saves()
+	if (repoPath != Files::Saves())
+	{
+		GitHelper::Init();
+		string filename = savePath.filename().string();
+		GitHelper::CreateCommit(repoPath, filename, dateString);
+		GitHelper::Shutdown();
+	}
 }
 
 void SaveGameManager::UpdateRecentSave()
@@ -107,20 +102,23 @@ string SaveGameManager::PathToRecent()
 
 string SaveGameManager::GeneratePath(const string &first, const string &last)
 {
-	string fileName = first + " " + last;
+	string folderName = first + " " + last;
 
 	// If there are multiple pilots with the same name, append a number to the
-	// pilot name to generate a unique file name.
-	string filePath = (Files::Saves() / fileName).string();
+	// pilot name to generate a unique folder name.
+	string folderPath = (Files::Saves() / folderName).string();
 	int index = 0;
 	while(true)
 	{
-		string path = filePath;
+		string path = folderPath;
 		if(index++)
 			path += " " + to_string(index);
-		path += ".txt";
 
-		if(!Files::Exists(path))
-			return path;
+		if(!Files::Exists(path)) {
+			// Create the directory
+			filesystem::create_directories(path);
+			// Return the path to the save file within that directory
+			return (filesystem::path(path) / (folderName + ".txt")).string();
+		}
 	}
 }

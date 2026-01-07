@@ -95,6 +95,68 @@ void SavedGame::Load(const filesystem::path &path)
 	}
 }
 
+void SavedGame::Load(const string &data)
+{
+	Clear();
+	stringstream ss(data);
+	DataFile file(ss);
+
+	// Set a placeholder path so that IsLoaded() returns true.
+	this->path = "memory";
+
+	int flagshipIterator = -1;
+	int flagshipTarget = 0;
+
+	for(const DataNode &node : file)
+	{
+		const string &key = node.Token(0);
+		bool hasValue = node.Size() >= 2;
+		if(key == "pilot" && node.Size() >= 3)
+			name = node.Token(1) + " " + node.Token(2);
+		else if(key == "date" && node.Size() >= 4)
+			date = Date(node.Value(1), node.Value(2), node.Value(3)).ToString();
+		else if(key == "system" && hasValue)
+		{
+			system = node.Token(1);
+			const System *savedSystem = GameData::Systems().Find(system);
+			if(savedSystem && savedSystem->IsValid())
+				system = savedSystem->DisplayName();
+		}
+		else if(key == "planet" && hasValue)
+		{
+			planet = node.Token(1);
+			const Planet *savedPlanet = GameData::Planets().Find(planet);
+			if(savedPlanet && savedPlanet->IsValid())
+				planet = savedPlanet->DisplayName();
+		}
+		else if(key == "playtime" && hasValue)
+			playTime = Format::PlayTime(node.Value(1));
+		else if(key == "flagship index" && hasValue)
+			flagshipTarget = node.Value(1);
+		else if(key == "account")
+		{
+			for(const DataNode &child : node)
+				if(child.Token(0) == "credits" && child.Size() >= 2)
+				{
+					credits = Format::Credits(child.Value(1));
+					break;
+				}
+		}
+		else if(key == "ship" && ++flagshipIterator == flagshipTarget)
+		{
+			for(const DataNode &child : node)
+			{
+				const string &childKey = child.Token(0);
+				bool childHasValue = child.Size() >= 2;
+				if(childKey == "name" && childHasValue)
+					shipName = child.Token(1);
+				else if(childKey == "sprite" && childHasValue)
+					shipSprite = SpriteSet::Get(child.Token(1));
+			}
+		}
+	}
+}
+
 
 
 const filesystem::path &SavedGame::Path() const

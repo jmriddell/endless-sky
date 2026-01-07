@@ -238,6 +238,16 @@ void PlayerInfo::Load(const filesystem::path &path)
 	Load(manager.Load());
 }
 
+void PlayerInfo::Load(const string &blob)
+{
+	stringstream ss(blob);
+	DataFile parser(ss);
+	DataNode root;
+	for(const DataNode &child : parser)
+		root.AddChild(child);
+	Load(root);
+}
+
 void PlayerInfo::Load(const DataNode &root)
 {
 	// Make sure any previously loaded data is cleared.

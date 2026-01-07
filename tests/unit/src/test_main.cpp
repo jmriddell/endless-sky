@@ -17,6 +17,7 @@ this program. If not, see <https://www.gnu.org/licenses/>.
 #include "es-test.hpp"
 
 #include "../../../source/Random.h"
+#include "../../../source/Files.h"
 
 #include <ctime>
 
@@ -24,6 +25,13 @@ int main(int argc, const char *const argv[])
 {
 	// Seed the random number generator.
 	Random::Seed(time(nullptr));
+
+	// Initialize the files class.
+	try {
+		Files::Init(argv);
+	} catch(...) {
+		// Ignore initialization errors in test environment if resources are missing
+	}
 
 	// Run the tests.
 	return Catch::Session().run(argc, argv);
